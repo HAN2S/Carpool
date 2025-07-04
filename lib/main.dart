@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'screens/welcome_screen.dart';
 import 'screens/signin_screen.dart';
@@ -6,9 +7,17 @@ import 'screens/onboarding_screen.dart';
 import 'screens/weekly_schedule_screen.dart';
 import 'screens/driver_information_screen.dart';
 import 'main_screen.dart';
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 
-void main() {
+
+Future<void> main() async {
+  await setup();
   runApp(MyApp());
+}
+
+Future<void> setup() async {
+  await dotenv.load(fileName: ".env");
+  MapboxOptions.setAccessToken(dotenv.env["MAPBOX_ACCESS_TOKEN"]!,);
 }
 
 class MyApp extends StatelessWidget {

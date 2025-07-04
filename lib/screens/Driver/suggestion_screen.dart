@@ -1,12 +1,18 @@
+import 'dart:convert';
+import 'package:carpool_test/services/mapbox_service.dart';
 import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:flutter_google_maps_webservices/directions.dart' as directions;
-import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'profile_screen.dart';
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter/services.dart';
+import 'dart:typed_data';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
+
+import '../../../widgets/mapbox_map_widget.dart';
+import '../../config/mapbox_config.dart';
+import 'profile_screen.dart';
 
 class SuggestionScreen extends StatefulWidget {
   final String riderName;
@@ -18,273 +24,158 @@ class SuggestionScreen extends StatefulWidget {
 }
 
 class _SuggestionScreenState extends State<SuggestionScreen> {
-  final String apiKey = 'AIzaSyCdeeHhTXFdiPxVbunjt1mrHvdKalajkVg';
+  MapboxMap? _controller;
   bool isMapLoading = true;
-  bool areIconsLoaded = false;
   String mapError = '';
-  GoogleMapController? _mapController;
-  Set<Polyline> _polylines = {};
-  Set<Marker> _markers = {};
-  String rideInfo = 'Calculating...';
-  BitmapDescriptor? startIcon;
-  BitmapDescriptor? pickupIcon;
-  BitmapDescriptor? endIcon;
+  String rideInfo = 'Calculating route...';
+  int mapReloadKey = 0;
 
   Map<String, Map<String, dynamic>> riderDetails = {
     'Shayna S.': {
       'pickupLocation': 'Schönbühlstraße 90, 70188 Stuttgart, Allemagne',
       'pickupTime': '8:07',
       'department': 'Finance',
-      'preferences': ['Prefers quiet rides', 'Pets don’t bother me'],
-      'distance': 'I’m flexible within pick-up location',
+      'preferences': ['Prefers quiet rides', "Pets don't bother me"],
+      'distance': "I'm flexible within pick-up location",
     },
     'Michael B.': {
       'pickupLocation': 'Hamburg, Germany',
       'pickupTime': '8:15',
       'department': 'IT',
-      'preferences': ['Broken downjust fodo', 'I’m free long'],
-      'distance': 'I’m flexible within pick-up location',
+      'preferences': ['Broken downjust fodo', "I'm free long"],
+      'distance': "I'm flexible within pick-up location",
     },
     'Alex A.': {
       'pickupLocation': 'Frankfurt, Germany',
       'pickupTime': '17:12',
       'department': 'Marketing',
-      'preferences': ['Fast to coaims wito', 'I’m long farfire nm'],
-      'distance': 'I’m flexible within pick-up location',
+      'preferences': ['Fast to coaims wito', "I'm long farfire nm"],
+      'distance': "I'm flexible within pick-up location",
     },
   };
 
   final String startAddress = 'Epplestraße 18, 70597 Stuttgart, Allemagne';
   String endAddress = 'Andreas-Stihl-Straße 4, 71336 Waiblingen, Allemagne';
 
+  // We will store the resolved coordinates here
+  Point? _startPoint;
+  Point? _endPoint;
+  Point? _pickupPoint;
+  bool _markersReady = false;
+
   @override
   void initState() {
     super.initState();
-    print('SuggestionScreen: initState called');
-    _initializeIconsAndMap();
+    print('[SuggestionScreen] initState called');
+    _resolveRideCoordinates();
   }
 
-  Future<void> _initializeIconsAndMap() async {
-    print('SuggestionScreen: Starting initialization of icons and map');
-    await _loadCustomIcons();
-    if (mounted) {
-      print('SuggestionScreen: Icons loaded, proceeding to fetch route and map');
-      await _fetchRouteAndMap();
-    } else {
-      print('SuggestionScreen: Widget not mounted, skipping fetchRouteAndMap');
-    }
-  }
-
-  Future<void> _loadCustomIcons() async {
-    print('SuggestionScreen: Loading custom icons...');
+  Future<void> _resolveRideCoordinates() async {
+    // Geocode the addresses to coordinates
+    final startAddress = this.startAddress;
+    final pickupAddress = riderDetails[widget.riderName]!['pickupLocation'];
+    final endAddress = this.endAddress;
     try {
-      startIcon = await BitmapDescriptor.fromAssetImage(
-        const ImageConfiguration(size: Size(30, 30)),
-        'assets/icons/car.png',
-      );
-      print('SuggestionScreen: Start icon loaded');
-      pickupIcon = await BitmapDescriptor.fromAssetImage(
-        const ImageConfiguration(size: Size(30, 30)),
-        'assets/icons/person_pin.png',
-      );
-      print('SuggestionScreen: Pickup icon loaded');
-      endIcon = await BitmapDescriptor.fromAssetImage(
-        const ImageConfiguration(size: Size(30, 30)),
-        'assets/icons/destination.png',
-      );
-      print('SuggestionScreen: End icon loaded');
+      print('Geocoding start: $startAddress');
+      final startLocations = await locationFromAddress(startAddress);
+      print('Start geocoded: ${startLocations.first.latitude}, ${startLocations.first.longitude}');
+      print('Geocoding pickup: $pickupAddress');
+      final pickupLocations = await locationFromAddress(pickupAddress);
+      print('Pickup geocoded: ${pickupLocations.first.latitude}, ${pickupLocations.first.longitude}');
+      print('Geocoding end: $endAddress');
+      final endLocations = await locationFromAddress(endAddress);
+      print('End geocoded: ${endLocations.first.latitude}, ${endLocations.first.longitude}');
       setState(() {
-        areIconsLoaded = true;
+        _startPoint = Point(coordinates: Position(startLocations.first.longitude, startLocations.first.latitude));
+        _pickupPoint = Point(coordinates: Position(pickupLocations.first.longitude, pickupLocations.first.latitude));
+        _endPoint = Point(coordinates: Position(endLocations.first.longitude, endLocations.first.latitude));
+        _markersReady = true;
       });
-      print('SuggestionScreen: Custom icons loaded successfully');
     } catch (e) {
-      print('SuggestionScreen: Error loading custom icons: $e');
-      startIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
-      pickupIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
-      endIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
-      setState(() {
-        areIconsLoaded = true;
-      });
+      print('Error geocoding ride addresses: $e');
     }
   }
 
-  Future<void> _fetchRouteAndMap() async {
-    if (!areIconsLoaded) {
-      print('SuggestionScreen: Icons not yet loaded, waiting...');
-      return;
-    }
+  void _onMapCreated(MapboxMap mapboxMap) {
+    print('[SuggestionScreen] Map created!');
+    _controller = mapboxMap;
+  }
 
-    print('SuggestionScreen: Fetching route and map...');
+  Future<Point?> _getCoordinates(String address) async {
+    print('[SuggestionScreen] Geocoding address: $address');
+    try {
+      List<Location> locations = await locationFromAddress(address);
+      if (locations.isNotEmpty) {
+        final location = locations.first;
+        print('[SuggestionScreen] Geocoded to: ${location.latitude}, ${location.longitude}');
+        return Point(coordinates: Position(location.longitude, location.latitude));
+      }
+    } catch (e) {
+      print('[SuggestionScreen] Error geocoding address "$address": $e');
+    }
+    return null;
+  }
+
+  Future<void> _getCoordinatesAndDrawRoute() async {
+    print('[SuggestionScreen] Getting coordinates and drawing route...');
     setState(() {
       isMapLoading = true;
       mapError = '';
-      rideInfo = 'Calculating...';
     });
 
-    final directionsApi = directions.GoogleMapsDirections(apiKey: apiKey);
-    final riderInfo = riderDetails[widget.riderName]!;
-    final pickupLocation = riderInfo['pickupLocation'];
+    final riderPickupAddress = riderDetails[widget.riderName]!['pickupLocation'];
+    print('[SuggestionScreen] Pickup address: $riderPickupAddress');
 
-    print('SuggestionScreen: Fetching route from $startAddress to $endAddress via $pickupLocation');
+    _startPoint = Point(coordinates: Position(9.1770, 48.7823)); // Stuttgart
+    _pickupPoint = Point(coordinates: Position(9.183333, 48.766667)); // Stuttgart
+    _endPoint = Point(coordinates: Position(9.3164, 48.8328)); // Waiblingen
 
-    try {
-      final response = await directionsApi.directionsWithAddress(
-        startAddress,
-        endAddress,
-        waypoints: [directions.Waypoint.fromAddress(pickupLocation)],
-      ).timeout(Duration(seconds: 10), onTimeout: () {
-        throw Exception('Request timed out');
-      });
+    print('[SuggestionScreen] Start: $_startPoint, Pickup: $_pickupPoint, End: $_endPoint');
 
-      print('SuggestionScreen: Directions API Response: ${response.toJson()}');
-
-      if (!response.isOkay) {
-        print('SuggestionScreen: API Error: ${response.errorMessage}');
-        setState(() {
-          mapError = 'Failed to load route: ${response.errorMessage ?? "Unknown error"}';
-          isMapLoading = false;
-        });
-        return;
-      }
-
-      if (response.routes.isEmpty) {
-        print('SuggestionScreen: No routes found');
-        setState(() {
-          mapError = 'No routes available';
-          isMapLoading = false;
-        });
-        return;
-      }
-
-      final route = response.routes[0];
-      print('SuggestionScreen: Route found: ${route.summary}');
-
-      if (route.overviewPolyline == null || route.overviewPolyline!.points == null) {
-        print('SuggestionScreen: No polyline data available');
-        setState(() {
-          mapError = 'No route polyline available';
-          isMapLoading = false;
-        });
-        return;
-      }
-
-      final legs = route.legs;
-      if (legs.isEmpty || legs.length < 2) {
-        print('SuggestionScreen: Invalid route legs: $legs');
-        setState(() {
-          mapError = 'Invalid route legs';
-          isMapLoading = false;
-        });
-        return;
-      }
-
-      num totalDurationSeconds = 0;
-      num totalDistanceMeters = 0;
-
-      for (var leg in legs) {
-        totalDurationSeconds += leg.duration?.value ?? 0;
-        totalDistanceMeters += leg.distance?.value ?? 0;
-      }
-
-      final totalDurationMinutes = (totalDurationSeconds / 60).toInt();
-      final totalDistanceKm = (totalDistanceMeters / 1000).toStringAsFixed(1);
-
-      String durationText;
-      if (totalDurationMinutes >= 60) {
-        final hours = totalDurationMinutes ~/ 60;
-        final minutes = totalDurationMinutes % 60;
-        durationText = '$hours hr $minutes mins';
-      } else {
-        durationText = '$totalDurationMinutes mins';
-      }
-
+    if (_startPoint == null || _pickupPoint == null || _endPoint == null) {
+      print('[SuggestionScreen] One or more coordinates are null!');
       setState(() {
-        rideInfo = '$durationText • $totalDistanceKm km';
-      });
-
-      final polylinePoints = _decodePolyline(route.overviewPolyline!.points!);
-      print('SuggestionScreen: Decoded polyline points: $polylinePoints');
-
-      setState(() {
-        _polylines.clear();
-        _polylines.add(Polyline(
-          polylineId: PolylineId('route'),
-          points: polylinePoints,
-          color: Color(0xFF0288D1),
-          width: 5,
-        ));
-      });
-
-      final startLatLng = LatLng(legs[0].startLocation.lat, legs[0].startLocation.lng);
-      final pickupLatLng = LatLng(legs[0].endLocation.lat, legs[0].endLocation.lng);
-      final endLatLng = LatLng(legs[1].endLocation.lat, legs[1].endLocation.lng);
-
-      setState(() {
-        _markers.clear();
-        _markers.add(Marker(
-          markerId: MarkerId('start'),
-          position: startLatLng,
-          infoWindow: InfoWindow(title: 'Start: $startAddress'),
-          icon: startIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-        ));
-        _markers.add(Marker(
-          markerId: MarkerId('pickup'),
-          position: pickupLatLng,
-          infoWindow: InfoWindow(title: 'Pickup: $pickupLocation'),
-          icon: pickupIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
-        ));
-        _markers.add(Marker(
-          markerId: MarkerId('end'),
-          position: endLatLng,
-          infoWindow: InfoWindow(title: 'End: $endAddress'),
-          icon: endIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-        ));
-      });
-
-      if (route.bounds != null) {
-        final neLat = route.bounds!.northeast.lat;
-        final neLng = route.bounds!.northeast.lng;
-        final swLat = route.bounds!.southwest.lat;
-        final swLng = route.bounds!.southwest.lng;
-
-        final bounds = LatLngBounds(
-          northeast: LatLng(neLat, neLng),
-          southwest: LatLng(swLat, swLng),
-        );
-
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_mapController != null) {
-            _mapController!.animateCamera(
-              CameraUpdate.newLatLngBounds(bounds, 50),
-            );
-            print('SuggestionScreen: Camera updated to bounds: $bounds');
-          } else {
-            print('SuggestionScreen: Map controller not initialized yet');
-          }
-        });
-      } else {
-        print('SuggestionScreen: Route bounds are null');
-      }
-
-      setState(() {
+        mapError = 'Could not find coordinates for one or more addresses.';
         isMapLoading = false;
       });
-    } catch (e, stackTrace) {
-      print('SuggestionScreen: Exception caught: $e');
-      print('SuggestionScreen: Stack trace: $stackTrace');
-      setState(() {
-        mapError = 'Error loading map: $e';
-        rideInfo = 'Error calculating ride info';
-        isMapLoading = false;
-      });
+      return;
+    }
+
+    setState(() {
+      rideInfo = '';
+      isMapLoading = false;
+    });
+  }
+
+  Future<List<Uint8List>> _loadMarkerImages() async {
+    final ByteData carBytes = await rootBundle.load('assets/icons/car.png');
+    final ByteData startBytes = await rootBundle.load('assets/icons/person_pin.png');
+    final ByteData endBytes = await rootBundle.load('assets/icons/destination.png');
+    return [
+      carBytes.buffer.asUint8List(),
+      startBytes.buffer.asUint8List(),
+      endBytes.buffer.asUint8List(),
+    ];
+  }
+
+  Future<List<Position>> _fetchRoutePolyline(Position start, Position pickup, Position end) async {
+    final accessToken = MapboxConfig.accessToken;
+    final coordinates = '${start.lng},${start.lat};${pickup.lng},${pickup.lat};${end.lng},${end.lat}';
+    final url = 'https://api.mapbox.com/directions/v5/mapbox/driving/$coordinates?geometries=polyline&access_token=$accessToken';
+    final response = await http.get(Uri.parse(url));
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      final polyline = data['routes'][0]['geometry'];
+      return _decodePolyline(polyline);
+    } else {
+      throw Exception('Failed to fetch route');
     }
   }
 
-  List<LatLng> _decodePolyline(String encoded) {
-    List<LatLng> points = [];
+  List<Position> _decodePolyline(String encoded) {
+    List<Position> poly = [];
     int index = 0, len = encoded.length;
     int lat = 0, lng = 0;
-
     while (index < len) {
       int b, shift = 0, result = 0;
       do {
@@ -294,7 +185,6 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
       } while (b >= 0x20);
       int dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
       lat += dlat;
-
       shift = 0;
       result = 0;
       do {
@@ -304,148 +194,17 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
       } while (b >= 0x20);
       int dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
       lng += dlng;
-
-      points.add(LatLng(lat / 1E5, lng / 1E5));
+      poly.add(Position(lng / 1E5, lat / 1E5));
     }
-    return points;
-  }
-
-  Future<void> _launchGoogleMaps(String address) async {
-    print('SuggestionScreen: Launching Google Maps for address: $address');
-    final url = 'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(address)}';
-    if (await canLaunch(url)) {
-      await launch(url);
-    } else {
-      print('SuggestionScreen: Could not launch $url');
-    }
-  }
-
-  Future<void> _editAddress(String address, bool isPickup) async {
-    print('SuggestionScreen: Editing address, isPickup: $isPickup, current address: $address');
-    TextEditingController addressController = TextEditingController(text: address);
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(isPickup ? 'Edit Pickup Location' : 'Edit Drop-off Location'),
-          content: TextField(
-            controller: addressController,
-            decoration: InputDecoration(
-              labelText: isPickup ? 'Pickup Location' : 'Drop-off Location',
-              border: OutlineInputBorder(),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                print('SuggestionScreen: Edit address dialog - Cancel pressed');
-                Navigator.pop(context, false);
-              },
-              child: Text('Cancel'),
-            ),
-            TextButton(
-              onPressed: () {
-                if (addressController.text.trim().isEmpty) {
-                  print('SuggestionScreen: Edit address dialog - Empty address, showing snackbar');
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Please enter a valid address')),
-                  );
-                  return;
-                }
-                print('SuggestionScreen: Edit address dialog - Save pressed');
-                Navigator.pop(context, true);
-              },
-              child: Text('Save'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (result == true) {
-      final newAddress = addressController.text.trim();
-      setState(() {
-        if (isPickup) {
-          riderDetails[widget.riderName]!['pickupLocation'] = newAddress;
-        } else {
-          endAddress = newAddress;
-        }
-      });
-      print('SuggestionScreen: Updated ${isPickup ? 'pickup' : 'drop-off'} location to: $newAddress');
-
-      await _fetchRouteAndMap();
-    }
-  }
-
-  Future<void> _editPickupTime(String currentTime) async {
-    print('SuggestionScreen: Editing pickup time, current time: $currentTime');
-    final timeParts = currentTime.split(':');
-    final initialHour = int.parse(timeParts[0]);
-    final initialMinute = int.parse(timeParts[1]);
-
-    final TimeOfDay? selectedTime = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: initialHour, minute: initialMinute),
-      builder: (BuildContext context, Widget? child) {
-        return MediaQuery(
-          data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: false),
-          child: child!,
-        );
-      },
-    );
-
-    if (selectedTime != null) {
-      final formattedTime = '${selectedTime.hour}:${selectedTime.minute.toString().padLeft(2, '0')}';
-      print('SuggestionScreen: Selected pickup time: $formattedTime');
-
-      setState(() {
-        riderDetails[widget.riderName]!['pickupTime'] = formattedTime;
-      });
-    } else {
-      print('SuggestionScreen: No time selected');
-    }
-  }
-
-  void _onMapTap() {
-    print('SuggestionScreen: Map tapped');
-    if (mapError.isNotEmpty) {
-      print('SuggestionScreen: Map tap ignored due to error: $mapError');
-      return;
-    }
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => FullScreenMap(
-          polylines: _polylines,
-          markers: _markers,
-          initialBounds: _mapController != null && _polylines.isNotEmpty
-              ? LatLngBounds(
-                  northeast: LatLng(
-                    _polylines.first.points.map((p) => p.latitude).reduce(math.max),
-                    _polylines.first.points.map((p) => p.longitude).reduce(math.max),
-                  ),
-                  southwest: LatLng(
-                    _polylines.first.points.map((p) => p.latitude).reduce(math.min),
-                    _polylines.first.points.map((p) => p.longitude).reduce(math.min),
-                  ),
-                )
-              : null,
-        ),
-      ),
-    );
+    return poly;
   }
 
   @override
   Widget build(BuildContext context) {
-    print('SuggestionScreen: Building UI');
-    final riderInfo = riderDetails[widget.riderName]!;
-    print('SuggestionScreen: Rider info retrieved: $riderInfo');
-
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          'Suggestion (Driver)',
+          'Suggestion Info',
           style: GoogleFonts.roboto(
             fontSize: 20,
             fontWeight: FontWeight.w500,
@@ -457,7 +216,6 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
         leading: IconButton(
           icon: Icon(Icons.arrow_back, color: Colors.black),
           onPressed: () {
-            print('SuggestionScreen: Back button pressed');
             Navigator.pop(context);
           },
         ),
@@ -473,82 +231,74 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Column(
-                  children: [
-                    GestureDetector(
-                      onTap: _onMapTap,
-                      child: Container(
-                        height: 200,
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.only(
-                            topLeft: Radius.circular(12),
-                            topRight: Radius.circular(12),
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black12,
-                              blurRadius: 4,
-                              offset: Offset(0, 2),
-                            ),
-                          ],
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.only(
-                            topLeft: Radius.circular(12),
-                            topRight: Radius.circular(12),
-                          ),
-                          child: isMapLoading
-                              ? Center(child: CircularProgressIndicator())
-                              : mapError.isNotEmpty
-                                  ? Center(child: Text(mapError, textAlign: TextAlign.center))
-                                  : GoogleMap(
-                                      onMapCreated: (controller) {
-                                        print('SuggestionScreen: Map created');
-                                        _mapController = controller;
-                                        if (_polylines.isNotEmpty) {
-                                          final bounds = LatLngBounds(
-                                            northeast: LatLng(
-                                              _polylines.first.points.map((p) => p.latitude).reduce(math.max),
-                                              _polylines.first.points.map((p) => p.longitude).reduce(math.max),
+                child: Container(
+                  height: 200,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(12),
+                      topRight: Radius.circular(12),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black12,
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(12),
+                      topRight: Radius.circular(12),
+                    ),
+                    child: _markersReady && _startPoint != null && _pickupPoint != null && _endPoint != null
+                        ? FutureBuilder<List<Uint8List>>(
+                            future: _loadMarkerImages(),
+                            builder: (context, snapshot) {
+                              if (!snapshot.hasData) return Center(child: CircularProgressIndicator());
+                              final carImageBytes = snapshot.data![0];
+                              final startImageBytes = snapshot.data![1];
+                              final endImageBytes = snapshot.data![2];
+                              return Stack(
+                                children: [
+                                  MapboxMapWidget(
+                                    key: ValueKey('mapWithMarker'),
+                                    initialPosition: _pickupPoint!,
+                                    zoom: 10,
+                                    onMapCreated: (mapboxMap) async {
+                                      _controller = mapboxMap;
+                                      await _addMarkers();
+                                    },
+                                  ),
+                                  Positioned.fill(
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.translucent,
+                                      onTap: () {
+                                        print('Tapped!');
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => FullscreenMapScreen(
+                                              startPoint: _startPoint!,
+                                              pickupPoint: _pickupPoint!,
+                                              endPoint: _endPoint!,
+                                              carImageBytes: carImageBytes,
+                                              startImageBytes: startImageBytes,
+                                              endImageBytes: endImageBytes,
                                             ),
-                                            southwest: LatLng(
-                                              _polylines.first.points.map((p) => p.latitude).reduce(math.min),
-                                              _polylines.first.points.map((p) => p.longitude).reduce(math.min),
-                                            ),
-                                          );
-                                          controller.animateCamera(
-                                            CameraUpdate.newLatLngBounds(bounds, 50),
-                                          );
-                                          print('SuggestionScreen: Camera updated to bounds: $bounds');
-                                        }
+                                          ),
+                                        );
                                       },
-                                      initialCameraPosition: CameraPosition(
-                                        target: LatLng(48.766667, 9.183333),
-                                        zoom: 10,
-                                      ),
-                                      polylines: _polylines,
-                                      markers: _markers,
-                                      zoomControlsEnabled: false,
-                                      myLocationEnabled: false,
-                                      myLocationButtonEnabled: false,
-                                      mapToolbarEnabled: false,
+                                      child: Container(),
                                     ),
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding: EdgeInsets.all(16),
-                      child: Text(
-                        rideInfo,
-                        style: GoogleFonts.roboto(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                  ],
+                                  ),
+                                ],
+                              );
+                            },
+                          )
+                        : Center(child: CircularProgressIndicator()),
+                  ),
                 ),
               ),
             ),
@@ -590,7 +340,7 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                         ),
                                         SizedBox(height: 4),
                                         Text(
-                                          riderInfo['pickupLocation'],
+                                          riderDetails[widget.riderName]!['pickupLocation'],
                                           style: GoogleFonts.roboto(
                                             fontSize: 14,
                                             color: Colors.grey[600],
@@ -601,11 +351,11 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                   ),
                                   IconButton(
                                     icon: Icon(Icons.edit, color: Colors.grey[600], size: 20),
-                                    onPressed: () => _editAddress(riderInfo['pickupLocation'], true),
+                                    onPressed: () => _editAddress(riderDetails[widget.riderName]!['pickupLocation'], true),
                                   ),
                                   IconButton(
                                     icon: Icon(Icons.remove_red_eye, color: Colors.grey[600], size: 20),
-                                    onPressed: () => _launchGoogleMaps(riderInfo['pickupLocation']),
+                                    onPressed: () => _launchGoogleMaps(riderDetails[widget.riderName]!['pickupLocation']),
                                   ),
                                 ],
                               ),
@@ -685,7 +435,7 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                     ),
                                   ),
                                   Text(
-                                    riderInfo['pickupTime'],
+                                    riderDetails[widget.riderName]!['pickupTime'],
                                     style: GoogleFonts.roboto(
                                       fontSize: 16,
                                       fontWeight: FontWeight.w500,
@@ -695,7 +445,7 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                   SizedBox(width: 8),
                                   IconButton(
                                     icon: Icon(Icons.edit, color: Colors.grey[600], size: 20),
-                                    onPressed: () => _editPickupTime(riderInfo['pickupTime']),
+                                    onPressed: () => _editPickupTime(riderDetails[widget.riderName]!['pickupTime']),
                                   ),
                                 ],
                               ),
@@ -749,7 +499,7 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                         ),
                                       ],
                                     ),
-                                    ...riderInfo['preferences'].map<Widget>((pref) {
+                                    ...riderDetails[widget.riderName]!['preferences'].map<Widget>((pref) {
                                       return Padding(
                                         padding: EdgeInsets.only(left: 28, bottom: 4),
                                         child: Row(
@@ -782,7 +532,7 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
                                           ),
                                           SizedBox(width: 8),
                                           Text(
-                                            riderInfo['distance'],
+                                            riderDetails[widget.riderName]!['distance'],
                                             style: GoogleFonts.roboto(
                                               fontSize: 14,
                                               color: Colors.grey[600],
@@ -861,72 +611,318 @@ class _SuggestionScreenState extends State<SuggestionScreen> {
       ),
     );
   }
+
+  Future<void> _launchGoogleMaps(String address) async {
+    print('SuggestionScreen: Launching Google Maps for address: $address');
+    final url = 'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(address)}';
+    if (await canLaunch(url)) {
+      await launch(url);
+    } else {
+      print('SuggestionScreen: Could not launch $url');
+    }
+  }
+
+  Future<void> _editAddress(String address, bool isPickup) async {
+    print('SuggestionScreen: Editing address, isPickup: $isPickup, current address: $address');
+    TextEditingController addressController = TextEditingController(text: address);
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(isPickup ? 'Edit Pickup Location' : 'Edit Drop-off Location'),
+          content: TextField(
+            controller: addressController,
+            decoration: InputDecoration(
+              labelText: isPickup ? 'Pickup Location' : 'Drop-off Location',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                print('SuggestionScreen: Edit address dialog - Cancel pressed');
+                Navigator.pop(context, false);
+              },
+              child: Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (addressController.text.trim().isEmpty) {
+                  print('SuggestionScreen: Edit address dialog - Empty address, showing snackbar');
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Please enter a valid address')),
+                  );
+                  return;
+                }
+                print('SuggestionScreen: Edit address dialog - Save pressed');
+                Navigator.pop(context, true);
+              },
+              child: Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result == true) {
+      final newAddress = addressController.text.trim();
+      setState(() {
+        if (isPickup) {
+          riderDetails[widget.riderName]!['pickupLocation'] = newAddress;
+        } else {
+          endAddress = newAddress;
+        }
+        mapReloadKey++;
+      });
+      print('SuggestionScreen: Updated ${isPickup ? 'pickup' : 'drop-off'} location to: $newAddress');
+    }
+  }
+
+  Future<void> _editPickupTime(String currentTime) async {
+    print('SuggestionScreen: Editing pickup time, current time: $currentTime');
+    final timeParts = currentTime.split(':');
+    final initialHour = int.parse(timeParts[0]);
+    final initialMinute = int.parse(timeParts[1]);
+
+    final TimeOfDay? selectedTime = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: initialHour, minute: initialMinute),
+      builder: (BuildContext context, Widget? child) {
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: false),
+          child: child!,
+        );
+      },
+    );
+
+    if (selectedTime != null) {
+      final formattedTime = '${selectedTime.hour}:${selectedTime.minute.toString().padLeft(2, '0')}';
+      print('SuggestionScreen: Selected pickup time: $formattedTime');
+
+      setState(() {
+        riderDetails[widget.riderName]!['pickupTime'] = formattedTime;
+      });
+    } else {
+      print('SuggestionScreen: No time selected');
+    }
+  }
+
+  Future<void> _addMarkers() async {
+    print('Map created, adding markers...');
+    // Load the images from assets
+    final ByteData carBytes = await rootBundle.load('assets/icons/car.png');
+    final Uint8List carImageBytes = carBytes.buffer.asUint8List();
+    final ByteData startBytes = await rootBundle.load('assets/icons/person_pin.png');
+    final Uint8List startImageBytes = startBytes.buffer.asUint8List();
+    final ByteData endBytes = await rootBundle.load('assets/icons/destination.png');
+    final Uint8List endImageBytes = endBytes.buffer.asUint8List();
+    // Create the marker manager
+    final pointManager = await _controller!.annotations.createPointAnnotationManager();
+    // Add the pickup (car) marker
+    print('Adding pickup marker at: [32m${_pickupPoint!.coordinates}[0m');
+    await pointManager.create(
+      PointAnnotationOptions(
+        geometry: _pickupPoint!,
+        image: carImageBytes,
+        iconSize: 0.5,
+      ),
+    );
+    // Add the start marker
+    print('Adding start marker at: [34m${_startPoint!.coordinates}[0m');
+    await pointManager.create(
+      PointAnnotationOptions(
+        geometry: _startPoint!,
+        image: startImageBytes,
+        iconSize: 0.5,
+      ),
+    );
+    // Add the end marker
+    print('Adding end marker at: [31m${_endPoint!.coordinates}[0m');
+    await pointManager.create(
+      PointAnnotationOptions(
+        geometry: _endPoint!,
+        image: endImageBytes,
+        iconSize: 0.5,
+      ),
+    );
+    // Draw the polyline route
+    try {
+      final polylinePositions = await _fetchRoutePolyline(
+        _startPoint!.coordinates,
+        _pickupPoint!.coordinates,
+        _endPoint!.coordinates,
+      );
+      final polylineManager = await _controller!.annotations.createPolylineAnnotationManager();
+      await polylineManager.create(
+        PolylineAnnotationOptions(
+          geometry: LineString(coordinates: polylinePositions),
+          lineColor: 0xFF007AFF,
+          lineWidth: 8.0,
+        ),
+      );
+      // Calculate bounds
+      double minLat = polylinePositions.first.lat.toDouble(), maxLat = polylinePositions.first.lat.toDouble();
+      double minLng = polylinePositions.first.lng.toDouble(), maxLng = polylinePositions.first.lng.toDouble();
+      for (final pos in polylinePositions) {
+        if (pos.lat < minLat) minLat = pos.lat.toDouble();
+        if (pos.lat > maxLat) maxLat = pos.lat.toDouble();
+        if (pos.lng < minLng) minLng = pos.lng.toDouble();
+        if (pos.lng > maxLng) maxLng = pos.lng.toDouble();
+      }
+      // Center and zoom to fit bounds (approximate)
+      await _controller!.flyTo(
+        CameraOptions(
+          center: Point(coordinates: Position(((minLng + maxLng) / 2).toDouble(), ((minLat + maxLat) / 2).toDouble())),
+          zoom: 9.5, // You can adjust this value for best fit
+        ),
+        MapAnimationOptions(duration: 1500),
+      );
+      print('Route polyline drawn.');
+    } catch (e) {
+      print('Error drawing route polyline: $e');
+    }
+  }
 }
 
-class FullScreenMap extends StatefulWidget {
-  final Set<Polyline> polylines;
-  final Set<Marker> markers;
-  final LatLngBounds? initialBounds;
+class FullscreenMapScreen extends StatelessWidget {
+  final Point startPoint;
+  final Point pickupPoint;
+  final Point endPoint;
+  final Uint8List carImageBytes;
+  final Uint8List startImageBytes;
+  final Uint8List endImageBytes;
 
-  FullScreenMap({required this.polylines, required this.markers, this.initialBounds});
+  const FullscreenMapScreen({
+    required this.startPoint,
+    required this.pickupPoint,
+    required this.endPoint,
+    required this.carImageBytes,
+    required this.startImageBytes,
+    required this.endImageBytes,
+    Key? key,
+  }) : super(key: key);
 
-  @override
-  _FullScreenMapState createState() => _FullScreenMapState();
-}
+  Future<List<Position>> _fetchRoutePolyline(Position start, Position pickup, Position end) async {
+    final accessToken = MapboxConfig.accessToken;
+    final coordinates = '${start.lng},${start.lat};${pickup.lng},${pickup.lat};${end.lng},${end.lat}';
+    final url = 'https://api.mapbox.com/directions/v5/mapbox/driving/$coordinates?geometries=polyline&access_token=$accessToken';
+    final response = await http.get(Uri.parse(url));
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      final polyline = data['routes'][0]['geometry'];
+      return _decodePolyline(polyline);
+    } else {
+      throw Exception('Failed to fetch route');
+    }
+  }
 
-class _FullScreenMapState extends State<FullScreenMap> {
-  GoogleMapController? _mapController;
-
-  @override
-  void initState() {
-    super.initState();
-    print('FullScreenMap: initState called');
+  List<Position> _decodePolyline(String encoded) {
+    List<Position> poly = [];
+    int index = 0, len = encoded.length;
+    int lat = 0, lng = 0;
+    while (index < len) {
+      int b, shift = 0, result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      int dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lat += dlat;
+      shift = 0;
+      result = 0;
+      do {
+        b = encoded.codeUnitAt(index++) - 63;
+        result |= (b & 0x1f) << shift;
+        shift += 5;
+      } while (b >= 0x20);
+      int dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+      lng += dlng;
+      poly.add(Position(lng / 1E5, lat / 1E5));
+    }
+    return poly;
   }
 
   @override
   Widget build(BuildContext context) {
-    print('FullScreenMap: Building UI');
     return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          'Route Map',
-          style: GoogleFonts.roboto(
-            fontSize: 20,
-            fontWeight: FontWeight.w500,
-            color: Colors.black,
-          ),
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            MapboxMapWidget(
+              key: ValueKey('fullscreenMap'),
+              initialPosition: pickupPoint,
+              zoom: 12,
+              onMapCreated: (mapboxMap) async {
+                final pointManager = await mapboxMap.annotations.createPointAnnotationManager();
+                await pointManager.create(PointAnnotationOptions(
+                  geometry: pickupPoint,
+                  image: carImageBytes,
+                  iconSize: 0.5,
+                ));
+                await pointManager.create(PointAnnotationOptions(
+                  geometry: startPoint,
+                  image: startImageBytes,
+                  iconSize: 0.5,
+                ));
+                await pointManager.create(PointAnnotationOptions(
+                  geometry: endPoint,
+                  image: endImageBytes,
+                  iconSize: 0.5,
+                ));
+                // Draw the polyline route
+                try {
+                  final polylinePositions = await _fetchRoutePolyline(
+                    startPoint.coordinates,
+                    pickupPoint.coordinates,
+                    endPoint.coordinates,
+                  );
+                  final polylineManager = await mapboxMap.annotations.createPolylineAnnotationManager();
+                  await polylineManager.create(
+                    PolylineAnnotationOptions(
+                      geometry: LineString(coordinates: polylinePositions),
+                      lineColor: 0xFF007AFF,
+                      lineWidth: 8.0,
+                    ),
+                  );
+                  // Calculate bounds
+                  double minLat = polylinePositions.first.lat.toDouble(), maxLat = polylinePositions.first.lat.toDouble();
+                  double minLng = polylinePositions.first.lng.toDouble(), maxLng = polylinePositions.first.lng.toDouble();
+                  for (final pos in polylinePositions) {
+                    if (pos.lat < minLat) minLat = pos.lat.toDouble();
+                    if (pos.lat > maxLat) maxLat = pos.lat.toDouble();
+                    if (pos.lng < minLng) minLng = pos.lng.toDouble();
+                    if (pos.lng > maxLng) maxLng = pos.lng.toDouble();
+                  }
+                  // Center and zoom to fit bounds (approximate)
+                  await mapboxMap.flyTo(
+                    CameraOptions(
+                      center: Point(coordinates: Position(((minLng + maxLng) / 2).toDouble(), ((minLat + maxLat) / 2).toDouble())),
+                      zoom: 9.5,
+                    ),
+                    MapAnimationOptions(duration: 1500),
+                  );
+                  print('Route polyline drawn (fullscreen).');
+                } catch (e) {
+                  print('Error drawing route polyline (fullscreen): $e');
+                }
+              },
+            ),
+            Positioned(
+              top: 16,
+              left: 16,
+              child: CircleAvatar(
+                backgroundColor: Colors.white,
+                child: IconButton(
+                  icon: Icon(Icons.close, color: Colors.black),
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ),
+            ),
+          ],
         ),
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back, color: Colors.black),
-          onPressed: () {
-            print('FullScreenMap: Back button pressed');
-            Navigator.pop(context);
-          },
-        ),
-      ),
-      body: GoogleMap(
-        onMapCreated: (controller) {
-          print('FullScreenMap: Map created');
-          _mapController = controller;
-          if (widget.initialBounds != null) {
-            controller.animateCamera(
-              CameraUpdate.newLatLngBounds(widget.initialBounds!, 50),
-            );
-            print('FullScreenMap: Camera updated to bounds: ${widget.initialBounds}');
-          }
-        },
-        initialCameraPosition: CameraPosition(
-          target: LatLng(48.766667, 9.183333),
-          zoom: 30,
-        ),
-        polylines: widget.polylines,
-        markers: widget.markers,
-        zoomControlsEnabled: true,
-        myLocationEnabled: false,
-        myLocationButtonEnabled: false,
-        mapToolbarEnabled: false,
       ),
     );
   }

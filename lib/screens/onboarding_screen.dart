@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:location/location.dart' as loc;
 import 'package:geocoding/geocoding.dart' as geocoding;
-import 'package:flutter_google_maps_webservices/places.dart';
+import '../services/mapbox_service.dart';
+import '../config/mapbox_config.dart';
 import 'dart:async';
 
 class OnboardingScreen extends StatefulWidget {
@@ -14,8 +15,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final TextEditingController _homeAddressController = TextEditingController();
   final TextEditingController _workAddressController = TextEditingController();
   final loc.Location _location = loc.Location();
-  final String _googleApiKey = 'AIzaSyCdeeHhTXFdiPxVbunjt1mrHvdKalajkVg'; // Replace with your API key
-  late GoogleMapsPlaces _places;
+  late MapboxService _mapboxService;
   bool _isHomeDropdownVisible = false;
   bool _isWorkDropdownVisible = false;
   String? _currentLocation;
@@ -23,8 +23,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   double? _homeLongitude;
   double? _workLatitude;
   double? _workLongitude;
-  List<Prediction> _homeSuggestions = [];
-  List<Prediction> _workSuggestions = [];
+  List<MapboxPlace> _homeSuggestions = [];
+  List<MapboxPlace> _workSuggestions = [];
   final FocusNode _homeFocusNode = FocusNode();
   final FocusNode _workFocusNode = FocusNode();
   Timer? _debounce;
@@ -32,7 +32,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   @override
   void initState() {
     super.initState();
-    _places = GoogleMapsPlaces(apiKey: _googleApiKey);
+    _mapboxService = MapboxService(accessToken: MapboxConfig.accessToken);
     _homeFocusNode.addListener(() {
       setState(() {
         _isHomeDropdownVisible = _homeFocusNode.hasFocus;
@@ -79,73 +79,71 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Future<String?> _getCurrentLocation() async {
-  try {
-    print('Requesting location permission...');
-    final hasPermission = await _requestLocationPermission();
-    if (!hasPermission) {
-      print('Location permission denied');
+    try {
+      print('Requesting location permission...');
+      final hasPermission = await _requestLocationPermission();
+      if (!hasPermission) {
+        print('Location permission denied');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Location permission denied')),
+        );
+        return null;
+      }
+
+      print('Getting location data...');
+      final locationData = await _location.getLocation();
+      final latitude = locationData.latitude;
+      final longitude = locationData.longitude;
+
+      if (latitude == null || longitude == null) {
+        print('Failed to get latitude or longitude');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to get location coordinates')),
+        );
+        return null;
+      }
+
+      print('Location retrieved: ($latitude, $longitude)');
+      setState(() {
+        _homeLatitude = latitude;
+        _homeLongitude = longitude;
+        _workLatitude = latitude;
+        _workLongitude = longitude;
+      });
+
+      print('Fetching address from coordinates using Mapbox...');
+      final address = await _mapboxService.getAddressFromCoordinates(latitude, longitude);
+      if (address != null) {
+        print('Address from coordinates: $address');
+        return address;
+      } else {
+        print('No address found for coordinates');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not determine address from coordinates')),
+        );
+        return null;
+      }
+    } catch (e) {
+      print('Error getting location: $e');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Location permission denied')),
+        SnackBar(content: Text('Error getting location: $e')),
       );
       return null;
     }
+  }
 
-    print('Getting location data...');
-    final locationData = await _location.getLocation();
-    final latitude = locationData.latitude;
-    final longitude = locationData.longitude;
-
-    if (latitude == null || longitude == null) {
-      print('Failed to get latitude or longitude');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to get location coordinates')),
-      );
-      return null;
-    }
-
-    print('Location retrieved: ($latitude, $longitude)');
-    setState(() {
-      _homeLatitude = latitude;
-      _homeLongitude = longitude;
-      _workLatitude = latitude;
-      _workLongitude = longitude;
-    });
-
-    print('Fetching placemarks for coordinates...');
-    final placemarks = await geocoding.placemarkFromCoordinates(latitude, longitude);
-    if (placemarks.isNotEmpty) {
-      final placemark = placemarks.first;
-      final address = '${placemark.street}, ${placemark.locality}, ${placemark.country}';
-      print('Address from coordinates: $address');
-      return address;
+  Future<void> _fetchCurrentLocation() async {
+    print('Fetching current location...');
+    final location = await _getCurrentLocation();
+    if (location != null) {
+      print('Current location set: $location');
+      setState(() {
+        _currentLocation = location;
+      });
     } else {
-      print('No placemarks found for coordinates');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not determine address from coordinates')),
-      );
-      return null;
+      print('Failed to fetch current location');
     }
-  } catch (e) {
-    print('Error getting location: $e');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Error getting location: $e')),
-    );
-    return null;
   }
-}
-
-Future<void> _fetchCurrentLocation() async {
-  print('Fetching current location...');
-  final location = await _getCurrentLocation();
-  if (location != null) {
-    print('Current location set: $location');
-    setState(() {
-      _currentLocation = location;
-    });
-  } else {
-    print('Failed to fetch current location');
-  }
-}
 
   Future<void> _fetchSuggestions(String input, bool isHomeField) async {
     if (_debounce?.isActive ?? false) _debounce?.cancel();
@@ -162,26 +160,15 @@ Future<void> _fetchCurrentLocation() async {
       }
 
       try {
-        final response = await _places.autocomplete(
-          input,
-          language: 'en',
-          components: [Component(Component.country, 'de')],
-        );
+        final suggestions = await _mapboxService.searchPlaces(input, country: MapboxConfig.defaultCountry);
 
-        if (response.status == 'OK') {
-          setState(() {
-            if (isHomeField) {
-              _homeSuggestions = response.predictions ?? [];
-            } else {
-              _workSuggestions = response.predictions ?? [];
-            }
-          });
-        } else {
-          print('Error from Google Places API: ${response.status} - ${response.errorMessage}');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to fetch suggestions: ${response.status}')),
-          );
-        }
+        setState(() {
+          if (isHomeField) {
+            _homeSuggestions = suggestions;
+          } else {
+            _workSuggestions = suggestions;
+          }
+        });
       } catch (e) {
         print('Error fetching suggestions: $e');
         ScaffoldMessenger.of(context).showSnackBar(
@@ -193,35 +180,26 @@ Future<void> _fetchCurrentLocation() async {
 
   Future<void> _fetchPlaceDetails(String placeId, bool isHomeField) async {
     try {
-      final response = await _places.getDetailsByPlaceId(
-        placeId,
-        fields: ['geometry'],
-      );
-
-      if (response.status == 'OK') {
-        final location = response.result?.geometry?.location;
-        if (location != null) {
-          setState(() {
-            if (isHomeField) {
-              _homeLatitude = location.lat;
-              _homeLongitude = location.lng;
-              print("Home Coordinates: ($_homeLatitude, $_homeLongitude)");
-            } else {
-              _workLatitude = location.lat;
-              _workLongitude = location.lng;
-              print("Work Coordinates: ($_workLatitude, $_workLongitude)");
-            }
-          });
-        } else {
-          print('No location data found for place ID: $placeId');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('No location data found for this place')),
-          );
-        }
+      // For Mapbox, we need to find the place by ID from our suggestions
+      final suggestions = isHomeField ? _homeSuggestions : _workSuggestions;
+      final place = suggestions.firstWhere((place) => place.id == placeId);
+      
+      if (place != null) {
+        setState(() {
+          if (isHomeField) {
+            _homeLatitude = place.latitude;
+            _homeLongitude = place.longitude;
+            print("Home Coordinates: ($_homeLatitude, $_homeLongitude)");
+          } else {
+            _workLatitude = place.latitude;
+            _workLongitude = place.longitude;
+            print("Work Coordinates: ($_workLatitude, $_workLongitude)");
+          }
+        });
       } else {
-        print('Error from Google Places Details API: ${response.status} - ${response.errorMessage}');
+        print('No location data found for place ID: $placeId');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to fetch place details: ${response.status}')),
+          SnackBar(content: Text('No location data found for this place')),
         );
       }
     } catch (e) {
@@ -299,17 +277,15 @@ Future<void> _fetchCurrentLocation() async {
                                   },
                                 ),
                               ..._homeSuggestions.map((suggestion) => ListTile(
-                                    title: Text(suggestion.description ?? 'Unknown Place'),
+                                    title: Text(suggestion.placeName),
                                     onTap: () {
-                                      _homeAddressController.text = suggestion.description ?? 'Unknown Place';
+                                      _homeAddressController.text = suggestion.placeName;
                                       setState(() {
                                         _isHomeDropdownVisible = false;
                                         _homeSuggestions = [];
                                       });
                                       _homeFocusNode.unfocus();
-                                      if (suggestion.placeId != null) {
-                                        _fetchPlaceDetails(suggestion.placeId!, true);
-                                      }
+                                      _fetchPlaceDetails(suggestion.id, true);
                                     },
                                   )),
                             ],
@@ -367,17 +343,15 @@ Future<void> _fetchCurrentLocation() async {
                                   },
                                 ),
                               ..._workSuggestions.map((suggestion) => ListTile(
-                                    title: Text(suggestion.description ?? 'Unknown Place'),
+                                    title: Text(suggestion.placeName),
                                     onTap: () {
-                                      _workAddressController.text = suggestion.description ?? 'Unknown Place';
+                                      _workAddressController.text = suggestion.placeName;
                                       setState(() {
                                         _isWorkDropdownVisible = false;
                                         _workSuggestions = [];
                                       });
                                       _workFocusNode.unfocus();
-                                      if (suggestion.placeId != null) {
-                                        _fetchPlaceDetails(suggestion.placeId!, false);
-                                      }
+                                      _fetchPlaceDetails(suggestion.id, false);
                                     },
                                   )),
                             ],
